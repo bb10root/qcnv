@@ -72,7 +72,7 @@ void backup_all_nv(const char *dir_path)
 }
 
 // --- RESTORE: Завантаження NV з файлів у модем ---
-void restore_all_nv(const char *dir_path, int allow_imei)
+void restore_all_nv(const char *dir_path, int allow_imei, int dry_run)
 {
     struct dirent *de;
     DIR *dr = opendir(dir_path);
@@ -86,10 +86,11 @@ void restore_all_nv(const char *dir_path, int allow_imei)
     int success_count = 0;
     int fail_count = 0;
 
-    printf("Starting NV restore from '%s'...\n", dir_path);
+    printf("Starting NV %s from '%s'...\n", dry_run ? "restore (dry run)" : "restore", dir_path);
 
     // Включаємо прапор перезапису перед початком
-    nv_set_overwrite_flag(1);
+    if (!dry_run)
+        nv_set_overwrite_flag(1);
     uint8_t *buf = malloc(8192);
     if (!buf)
     {
@@ -129,7 +130,12 @@ void restore_all_nv(const char *dir_path, int allow_imei)
                 {
                     if (fread(buf, 1, fsize, fp) == (size_t)fsize)
                     {
-                        if (nv_write_item(id, buf, (uint32_t)fsize) == 1)
+                        if (dry_run)
+                        {
+                            printf("\nWould write NV %u (%ld bytes)\n", id, fsize);
+                            success_count++;
+                        }
+                        else if (nv_write_item(id, buf, (uint32_t)fsize) == 1)
                         {
                             success_count++;
                         }
@@ -160,9 +166,12 @@ void restore_all_nv(const char *dir_path, int allow_imei)
     closedir(dr);
 
     // Обов'язково скидаємо зміни на диск модема
-    efs_force_sync();
+    if (!dry_run)
+        efs_force_sync();
 
-    printf("\nRestore complete!\n- Success: %d\n- Failed: %d\n", success_count, fail_count);
+    printf("\n%s\n- Success: %d\n- Failed: %d\n",
+           dry_run ? "Dry run complete, nothing was written!" : "Restore complete!",
+           success_count, fail_count);
 }
 
 void print_usage(const char *bin_name)
@@ -174,7 +183,7 @@ void print_usage(const char *bin_name)
         "  EFS:   %1$s fread/fwrite <path> [value/file]\n\n",
         bin_name);
     printf("  Backup All: %s backup <dir_name>\n", bin_name);
-    printf("  Restore All:%s restore <dir_name> [--allow-imei]\n", bin_name);
+    printf("  Restore All:%s restore <dir_name> [--dry-run] [--allow-imei]\n", bin_name);
     printf("  NV %d (IMEI) is never written without --allow-imei.\n", NV_IMEI);
 }
 
@@ -229,6 +238,7 @@ int main(int argc, char *argv[])
     const char *target = argv[2];
     const char *filename = NULL;
     int allow_imei = 0;
+    int dry_run = 0;
     int ret = 0;
 
     for (int i = 1; i < argc; i++)
@@ -237,6 +247,8 @@ int main(int argc, char *argv[])
             filename = argv[++i];
         else if (strcmp(argv[i], "--allow-imei") == 0)
             allow_imei = 1;
+        else if (strcmp(argv[i], "--dry-run") == 0)
+            dry_run = 1;
     }
     if (strcmp(cmd, "backup") == 0)
     {
@@ -244,7 +256,7 @@ int main(int argc, char *argv[])
     }
     else if (strcmp(cmd, "restore") == 0)
     {
-        restore_all_nv(target, allow_imei);
+        restore_all_nv(target, allow_imei, dry_run);
     }
 
     // --- ЧИТАННЯ (read / fread / iread) ---
