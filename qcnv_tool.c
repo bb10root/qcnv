@@ -15,7 +15,8 @@
 #include <sys/stat.h>
 #include <errno.h>
 
-#define MAX_NV_ITEMS 80000
+#define MAX_NV_ITEMS 65536 // resp.item_id is uint16, higher ids never match
+#define NV_IMEI 550        // never written unless --allow-imei
 #define NV_BUF_SIZE 4096 // Деякі нові елементи можуть бути більшими за 2КБ
 
 // Допоміжна функція для створення папки
@@ -71,7 +72,7 @@ void backup_all_nv(const char *dir_path)
 }
 
 // --- RESTORE: Завантаження NV з файлів у модем ---
-void restore_all_nv(const char *dir_path)
+void restore_all_nv(const char *dir_path, int allow_imei)
 {
     struct dirent *de;
     DIR *dr = opendir(dir_path);
@@ -90,13 +91,25 @@ void restore_all_nv(const char *dir_path)
     // Включаємо прапор перезапису перед початком
     nv_set_overwrite_flag(1);
     uint8_t *buf = malloc(8192);
+    if (!buf)
+    {
+        closedir(dr);
+        return;
+    }
 
     while ((de = readdir(dr)) != NULL)
     {
-        // Шукаємо файли, що закінчуються на .nv
-        if (strstr(de->d_name, ".nv"))
+        // Only "<digits>.nv": atoi() on any other name would give 0 and overwrite NV 0.
+        char *end = NULL;
+        unsigned long lid = strtoul(de->d_name, &end, 10);
+        if (end != de->d_name && strcmp(end, ".nv") == 0 && lid < MAX_NV_ITEMS)
         {
-            uint32_t id = (uint32_t)atoi(de->d_name);
+            uint32_t id = (uint32_t)lid;
+            if (id == NV_IMEI && !allow_imei)
+            {
+                printf("\nSkipping NV %u (IMEI); use --allow-imei to restore it\n", id);
+                continue;
+            }
             char file_path[512];
             snprintf(file_path, sizeof(file_path), "%s/%s", dir_path, de->d_name);
 
@@ -107,7 +120,12 @@ void restore_all_nv(const char *dir_path)
                 long fsize = ftell(fp);
                 fseek(fp, 0, SEEK_SET);
 
-                if (fsize > 0 && fsize <= NV_BUF_SIZE)
+                if (fsize <= 0 || fsize > NV_BUF_SIZE)
+                {
+                    printf("\nBlock %u skipped: size %ld\n", id, fsize);
+                    fail_count++;
+                }
+                else
                 {
                     if (fread(buf, 1, fsize, fp) == (size_t)fsize)
                     {
@@ -117,15 +135,20 @@ void restore_all_nv(const char *dir_path)
                         }
                         else
                         {
-                            printf("\nBlock %d write failed\n", id);
+                            printf("\nBlock %u write failed\n", id);
                             fail_count++;
                         }
+                    }
+                    else
+                    {
+                        printf("\nBlock %u read from file failed\n", id);
+                        fail_count++;
                     }
                 }
                 fclose(fp);
             }
 
-            if (success_count % 10 == 0)
+            if ((success_count + fail_count) % 10 == 0)
             {
                 printf("Restoring: %d items processed...\r", success_count + fail_count);
                 fflush(stdout);
@@ -151,7 +174,8 @@ void print_usage(const char *bin_name)
         "  EFS:   %1$s fread/fwrite <path> [value/file]\n\n",
         bin_name);
     printf("  Backup All: %s backup <dir_name>\n", bin_name);
-    printf("  Restore All:%s restore <dir_name>\n", bin_name);
+    printf("  Restore All:%s restore <dir_name> [--allow-imei]\n", bin_name);
+    printf("  NV %d (IMEI) is never written without --allow-imei.\n", NV_IMEI);
 }
 
 void hex_dump(const uint8_t *data, uint32_t len)
@@ -204,14 +228,14 @@ int main(int argc, char *argv[])
     const char *cmd = argv[1];
     const char *target = argv[2];
     const char *filename = NULL;
+    int allow_imei = 0;
 
     for (int i = 1; i < argc; i++)
     {
         if (strcmp(argv[i], "-f") == 0 && (i + 1) < argc)
-        {
-            filename = argv[i + 1];
-            break;
-        }
+            filename = argv[++i];
+        else if (strcmp(argv[i], "--allow-imei") == 0)
+            allow_imei = 1;
     }
     if (strcmp(cmd, "backup") == 0)
     {
@@ -219,7 +243,7 @@ int main(int argc, char *argv[])
     }
     else if (strcmp(cmd, "restore") == 0)
     {
-        restore_all_nv(target);
+        restore_all_nv(target, allow_imei);
     }
 
     // --- ЧИТАННЯ (read / fread / iread) ---
@@ -334,7 +358,13 @@ int main(int argc, char *argv[])
             }
         }
 
-        if (payload)
+        if (payload && strcmp(cmd, "write") == 0 && (uint32_t)atoi(target) == NV_IMEI && !allow_imei)
+        {
+            printf("Error: NV %d is the IMEI; refusing to write without --allow-imei.\n", NV_IMEI);
+            free(payload);
+            payload = NULL;
+        }
+        else if (payload)
         {
             if (strcmp(cmd, "iwrite") == 0)
             {
