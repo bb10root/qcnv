@@ -239,11 +239,11 @@ int main(int argc, char *argv[])
         else if (strcmp(cmd, "iread") == 0)
         {
             int id = atoi(target);
-            // Виділяємо буфер під структуру IMS відповіді (розмір залежить від API)
-            char buffer[128];
-            if (ims_get_parm(id, &buffer) == 0)
+            // ims_get_parm() writes a NUL-terminated string of at most 127 chars.
+            buffer = calloc(1, 128);
+            if (buffer && ims_get_parm(id, (char *)buffer) == 0)
             {
-                data_len = strlen(buffer);
+                data_len = strlen((char *)buffer);
             }
         }
         else // fread

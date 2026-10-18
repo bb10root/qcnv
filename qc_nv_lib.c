@@ -922,11 +922,18 @@ int ims_get_parm(int id, char *val_str)
 
     memset(&res, 0, sizeof(res));
 
-    printf("ims id: %d\n", parm_id);
     int rc = p_qmi_send_sync(h, MSG_ID_GET_IMS_PARM, &parm_id, sizeof(parm_id), &res, sizeof(res), QMI_TIMEOUT_MS);
-    printf("rc: %d\n", rc);
-    hex_dump_raw("SG_ID_GET_IMS_PARM resp", &res, sizeof(res));
-    strncpy(val_str, res.val, 127);
+#ifdef DEBUG
+    printf("ims id: %d rc: %d\n", parm_id, rc);
+    hex_dump_raw("MSG_ID_GET_IMS_PARM resp", &res, sizeof(res));
+#endif
+    // val_str must hold at least 128 bytes.
+    // The length field is not confirmed against the modem; fall back to the string end.
+    uint32_t n = res.len;
+    if (n == 0 || n > 127)
+        n = strnlen(res.val, 127);
+    memcpy(val_str, res.val, n);
+    val_str[n] = '\0';
     return rc;
 }
 
