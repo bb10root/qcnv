@@ -11,6 +11,7 @@
 #include <stdlib.h>
 #include <pthread.h>
 #include <dlfcn.h>
+#include "qc_nv_lib.h"
 
 /* --- Типи функцій для dlsym (Прототипи QMI) --- */
 typedef void *(*get_svc_obj_t)(int, int, int);
@@ -655,7 +656,7 @@ uint32_t efs_get_file_size(const char *path)
     return 0;
 }
 
-int efs_read_file(const char *path, void *out_buf, uint32_t *size)
+int efs_read_file(const char *path, uint8_t *out_buf, size_t *size)
 {
     int h = get_qmi_client_handle();
     if (!h)
@@ -762,6 +763,8 @@ int efs_read_large_file(const char *path, uint8_t *out_buf, size_t *size)
     req.is_active = 1;
     req.total_req_len = (uint16_t)*size;
 
+    const size_t capacity = *size;
+
     pthread_mutex_lock(&g_nv_mutex);
 
     uint8_t curr_idx = 0;
@@ -795,12 +798,16 @@ int efs_read_large_file(const char *path, uint8_t *out_buf, size_t *size)
         }
 
         // Перевірка на переповнення буфера
-        if (resp.chunk_len > CHUNK_SIZE)
+        if (resp.chunk_len > CHUNK_SIZE ||
+            (size_t)curr_idx * CHUNK_SIZE + resp.chunk_len > capacity)
+        {
+            success = -1;
             break;
+        }
 
         memcpy(out_buf + (curr_idx * CHUNK_SIZE), resp.data, resp.chunk_len);
 
-        *size = resp.total_size;
+        *size = (resp.total_size > capacity) ? capacity : resp.total_size;
 
         curr_idx++;
         if (resp.has_more != 0 && resp.next_index != curr_idx)
@@ -841,6 +848,9 @@ int efs_write_file(const char *path, const uint8_t *data, uint32_t len)
 
     int16_t res_code = -1;
 
+    if (len > CHUNK_SIZE || strlen(path) > 127)
+        return -1;
+
     memset(&req, 0, sizeof(req));
     req.p_len = strlen(path);
     strncpy(req.path, path, 127);
@@ -876,6 +886,8 @@ int efs_write_large_file(const char *path, const uint8_t *data, uint32_t len)
 
     int16_t res_code = -1;
     uint32_t num_chunks = (len + CHUNK_SIZE - 1) / CHUNK_SIZE;
+    if (len == 0 || len > 0xFFFF || num_chunks > 255 || strlen(path) > 127)
+        return -1;
     memset(&req, 0, sizeof(req));
     req.is_large = 1;
     req.seq = 0xF1;
@@ -885,7 +897,7 @@ int efs_write_large_file(const char *path, const uint8_t *data, uint32_t len)
     strncpy(req.path, path, 127);
 
     pthread_mutex_lock(&g_nv_mutex);
-    for (uint8_t i = 0; i < num_chunks; i++)
+    for (uint32_t i = 0; i < num_chunks; i++)
     {
         req.total = (uint16_t)len;
         req.idx = i;
@@ -894,8 +906,13 @@ int efs_write_large_file(const char *path, const uint8_t *data, uint32_t len)
         req.c_len = c_len;
         memcpy(req.chunk, data + (i * CHUNK_SIZE), c_len);
 
-        if (p_qmi_send_sync(h, MSG_ID_WRITE_EFS, &req, sizeof(req), &res_code, 2, QMI_TIMEOUT_MS) != 0)
+        res_code = -1;
+        if (p_qmi_send_sync(h, MSG_ID_WRITE_EFS, &req, sizeof(req), &res_code, 2, QMI_TIMEOUT_MS) != 0 || res_code != 0)
+        {
+            if (res_code == 0)
+                res_code = -1;
             break;
+        }
     }
     pthread_mutex_unlock(&g_nv_mutex);
     return (int)res_code;
@@ -904,8 +921,9 @@ int efs_write_large_file(const char *path, const uint8_t *data, uint32_t len)
 /**
  * Секція 4: IMS Параметри
  */
-int ims_get_parm(int16_t parm_id, char *val_str)
+int ims_get_parm(int id, char *val_str)
 {
+    int16_t parm_id = (int16_t)id; // 16-bit on the wire
     int h = get_qmi_client_handle();
     if (!h || !val_str)
         return -1;
@@ -920,11 +938,18 @@ int ims_get_parm(int16_t parm_id, char *val_str)
 
     memset(&res, 0, sizeof(res));
 
-    printf("ims id: %d\n", parm_id);
     int rc = p_qmi_send_sync(h, MSG_ID_GET_IMS_PARM, &parm_id, sizeof(parm_id), &res, sizeof(res), QMI_TIMEOUT_MS);
-    printf("rc: %d\n", rc);
-    hex_dump_raw("SG_ID_GET_IMS_PARM resp", &res, sizeof(res));
-    strncpy(val_str, res.val, 127);
+#ifdef DEBUG
+    printf("ims id: %d rc: %d\n", parm_id, rc);
+    hex_dump_raw("MSG_ID_GET_IMS_PARM resp", &res, sizeof(res));
+#endif
+    // val_str must hold at least 128 bytes.
+    // The length field is not confirmed against the modem; fall back to the string end.
+    uint32_t n = res.len;
+    if (n == 0 || n > 127)
+        n = strnlen(res.val, 127);
+    memcpy(val_str, res.val, n);
+    val_str[n] = '\0';
     return rc;
 }
 

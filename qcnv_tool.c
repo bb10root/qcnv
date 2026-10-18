@@ -15,7 +15,8 @@
 #include <sys/stat.h>
 #include <errno.h>
 
-#define MAX_NV_ITEMS 80000
+#define MAX_NV_ITEMS 65536 // resp.item_id is uint16, higher ids never match
+#define NV_IMEI 550        // never written unless --allow-imei
 #define NV_BUF_SIZE 4096 // Деякі нові елементи можуть бути більшими за 2КБ
 
 // Допоміжна функція для створення папки
@@ -71,7 +72,7 @@ void backup_all_nv(const char *dir_path)
 }
 
 // --- RESTORE: Завантаження NV з файлів у модем ---
-void restore_all_nv(const char *dir_path)
+void restore_all_nv(const char *dir_path, int allow_imei, int dry_run)
 {
     struct dirent *de;
     DIR *dr = opendir(dir_path);
@@ -85,18 +86,31 @@ void restore_all_nv(const char *dir_path)
     int success_count = 0;
     int fail_count = 0;
 
-    printf("Starting NV restore from '%s'...\n", dir_path);
+    printf("Starting NV %s from '%s'...\n", dry_run ? "restore (dry run)" : "restore", dir_path);
 
     // Включаємо прапор перезапису перед початком
-    nv_set_overwrite_flag(1);
+    if (!dry_run)
+        nv_set_overwrite_flag(1);
     uint8_t *buf = malloc(8192);
+    if (!buf)
+    {
+        closedir(dr);
+        return;
+    }
 
     while ((de = readdir(dr)) != NULL)
     {
-        // Шукаємо файли, що закінчуються на .nv
-        if (strstr(de->d_name, ".nv"))
+        // Only "<digits>.nv": atoi() on any other name would give 0 and overwrite NV 0.
+        char *end = NULL;
+        unsigned long lid = strtoul(de->d_name, &end, 10);
+        if (end != de->d_name && strcmp(end, ".nv") == 0 && lid < MAX_NV_ITEMS)
         {
-            uint32_t id = (uint32_t)atoi(de->d_name);
+            uint32_t id = (uint32_t)lid;
+            if (id == NV_IMEI && !allow_imei)
+            {
+                printf("\nSkipping NV %u (IMEI); use --allow-imei to restore it\n", id);
+                continue;
+            }
             char file_path[512];
             snprintf(file_path, sizeof(file_path), "%s/%s", dir_path, de->d_name);
 
@@ -107,25 +121,40 @@ void restore_all_nv(const char *dir_path)
                 long fsize = ftell(fp);
                 fseek(fp, 0, SEEK_SET);
 
-                if (fsize > 0 && fsize <= NV_BUF_SIZE)
+                if (fsize <= 0 || fsize > NV_BUF_SIZE)
+                {
+                    printf("\nBlock %u skipped: size %ld\n", id, fsize);
+                    fail_count++;
+                }
+                else
                 {
                     if (fread(buf, 1, fsize, fp) == (size_t)fsize)
                     {
-                        if (nv_write_item(id, buf, (uint32_t)fsize) == 1)
+                        if (dry_run)
+                        {
+                            printf("\nWould write NV %u (%ld bytes)\n", id, fsize);
+                            success_count++;
+                        }
+                        else if (nv_write_item(id, buf, (uint32_t)fsize) == 1)
                         {
                             success_count++;
                         }
                         else
                         {
-                            printf("\nBlock %d write failed\n", id);
+                            printf("\nBlock %u write failed\n", id);
                             fail_count++;
                         }
+                    }
+                    else
+                    {
+                        printf("\nBlock %u read from file failed\n", id);
+                        fail_count++;
                     }
                 }
                 fclose(fp);
             }
 
-            if (success_count % 10 == 0)
+            if ((success_count + fail_count) % 10 == 0)
             {
                 printf("Restoring: %d items processed...\r", success_count + fail_count);
                 fflush(stdout);
@@ -137,9 +166,12 @@ void restore_all_nv(const char *dir_path)
     closedir(dr);
 
     // Обов'язково скидаємо зміни на диск модема
-    efs_force_sync();
+    if (!dry_run)
+        efs_force_sync();
 
-    printf("\nRestore complete!\n- Success: %d\n- Failed: %d\n", success_count, fail_count);
+    printf("\n%s\n- Success: %d\n- Failed: %d\n",
+           dry_run ? "Dry run complete, nothing was written!" : "Restore complete!",
+           success_count, fail_count);
 }
 
 void print_usage(const char *bin_name)
@@ -151,7 +183,8 @@ void print_usage(const char *bin_name)
         "  EFS:   %1$s fread/fwrite <path> [value/file]\n\n",
         bin_name);
     printf("  Backup All: %s backup <dir_name>\n", bin_name);
-    printf("  Restore All:%s restore <dir_name>\n", bin_name);
+    printf("  Restore All:%s restore <dir_name> [--dry-run] [--allow-imei]\n", bin_name);
+    printf("  NV %d (IMEI) is never written without --allow-imei.\n", NV_IMEI);
 }
 
 void hex_dump(const uint8_t *data, uint32_t len)
@@ -204,14 +237,18 @@ int main(int argc, char *argv[])
     const char *cmd = argv[1];
     const char *target = argv[2];
     const char *filename = NULL;
+    int allow_imei = 0;
+    int dry_run = 0;
+    int ret = 0;
 
     for (int i = 1; i < argc; i++)
     {
         if (strcmp(argv[i], "-f") == 0 && (i + 1) < argc)
-        {
-            filename = argv[i + 1];
-            break;
-        }
+            filename = argv[++i];
+        else if (strcmp(argv[i], "--allow-imei") == 0)
+            allow_imei = 1;
+        else if (strcmp(argv[i], "--dry-run") == 0)
+            dry_run = 1;
     }
     if (strcmp(cmd, "backup") == 0)
     {
@@ -219,11 +256,11 @@ int main(int argc, char *argv[])
     }
     else if (strcmp(cmd, "restore") == 0)
     {
-        restore_all_nv(target);
+        restore_all_nv(target, allow_imei, dry_run);
     }
 
     // --- ЧИТАННЯ (read / fread / iread) ---
-    if (strcmp(cmd, "read") == 0 || strcmp(cmd, "fread") == 0 || strcmp(cmd, "iread") == 0)
+    else if (strcmp(cmd, "read") == 0 || strcmp(cmd, "fread") == 0 || strcmp(cmd, "iread") == 0)
     {
         uint8_t *buffer = NULL;
         size_t data_len = 0;
@@ -239,19 +276,18 @@ int main(int argc, char *argv[])
         else if (strcmp(cmd, "iread") == 0)
         {
             int id = atoi(target);
-            // Виділяємо буфер під структуру IMS відповіді (розмір залежить від API)
-            char buffer[128];
-            if (ims_get_parm(id, &buffer) == 0)
+            // ims_get_parm() writes a NUL-terminated string of at most 127 chars.
+            buffer = calloc(1, 128);
+            if (buffer && ims_get_parm(id, (char *)buffer) == 0)
             {
-                data_len = strlen(buffer);
+                data_len = strlen((char *)buffer);
             }
         }
         else // fread
         {
             uint32_t f_size = efs_get_file_size(target);
-            if (f_size > 0)
+            if (f_size > 0 && (buffer = malloc(f_size)) != NULL)
             {
-                buffer = malloc(f_size);
                 data_len = f_size;
                 if (f_size < 0x800)
                 {
@@ -287,6 +323,7 @@ int main(int argc, char *argv[])
         else
         {
             printf("Error: Could not read '%s'\n", target);
+            ret = 1;
         }
         free(buffer);
     }
@@ -334,7 +371,14 @@ int main(int argc, char *argv[])
             }
         }
 
-        if (payload)
+        if (payload && strcmp(cmd, "write") == 0 && (uint32_t)atoi(target) == NV_IMEI && !allow_imei)
+        {
+            printf("Error: NV %d is the IMEI; refusing to write without --allow-imei.\n", NV_IMEI);
+            free(payload);
+            payload = NULL;
+            ret = 1;
+        }
+        else if (payload)
         {
             if (strcmp(cmd, "iwrite") == 0)
             {
@@ -348,6 +392,7 @@ int main(int argc, char *argv[])
                 else
                 {
                     printf("Error: IMS set_parm failed\n");
+                    ret = 1;
                 }
             }
             else if (strcmp(cmd, "fwrite") == 0)
@@ -361,7 +406,10 @@ int main(int argc, char *argv[])
                     printf("Success: Written %zu bytes to EFS '%s'\n", p_len, target);
                 }
                 else
+                {
                     printf("Error: EFS write failed\n");
+                    ret = 1;
+                }
             }
             else // write (NV)
             {
@@ -372,15 +420,26 @@ int main(int argc, char *argv[])
                     efs_force_sync();
                     printf("Success: Written %zu bytes to NV %d\n", p_len, id);
                 }
+                else
+                {
+                    printf("Error: NV %u write failed (max 128 bytes)\n", id);
+                    ret = 1;
+                }
             }
             free(payload);
         }
-        else
+        else if (!ret)
         {
             printf("Error: No data to write.\n");
+            ret = 1;
         }
+    }
+    else
+    {
+        print_usage(argv[0]);
+        ret = 1;
     }
 
     release_qmi_client();
-    return 0;
+    return ret;
 }
