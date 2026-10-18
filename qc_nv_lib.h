@@ -13,7 +13,7 @@ extern "C"
      * @brief Ініціалізує символи та відкриває сесію з модемом.
      * @return Дескриптор клієнта (handle) або 0 у разі помилки.
      */
-    int get_qmi_client_handle(void);
+    uint32_t get_qmi_client_handle(void);
 
     /**
      * @brief Закриває сесію та звільняє ресурси.
@@ -27,7 +27,7 @@ extern "C"
      * @param read_len Вказівник, куди буде записано фактичну довжину даних.
      * @return 0 при успіху, інакше код помилки.
      */
-    int nv_read_item(uint16_t item_id, uint8_t *out_data, uint32_t *read_len);
+    int nv_read_item(uint32_t item_id, uint8_t *out_data, uint32_t *read_len);
 
     /**
      * Запис класичного NV-ітема (ID 2).
@@ -36,7 +36,7 @@ extern "C"
      * @param data_len Довжина даних (макс. 128 байт).
      * @return 1 при успіху, 0 при помилці.
      */
-    int nv_write_item(uint16_t item_id, const uint8_t *data, uint32_t data_len);
+    int nv_write_item(uint32_t item_id, const uint8_t *data, uint32_t data_len);
 
     /**
      * @brief Читання розміру файлу в EFS модему.
@@ -101,7 +101,7 @@ extern "C"
      * @param out_resp_struct Вказівник на структуру відповіді.
      * @return 0 при успіху.
      */
-    int ims_get_parm(int parm_id, void *out_resp_struct);
+    int ims_get_parm(int parm_id, char *val_str);
 
     /**
      * @brief Встановлення текстового параметра IMS.

@@ -11,6 +11,7 @@
 #include <stdlib.h>
 #include <pthread.h>
 #include <dlfcn.h>
+#include "qc_nv_lib.h"
 
 /* --- Типи функцій для dlsym (Прототипи QMI) --- */
 typedef void *(*get_svc_obj_t)(int, int, int);
@@ -655,7 +656,7 @@ uint32_t efs_get_file_size(const char *path)
     return 0;
 }
 
-int efs_read_file(const char *path, void *out_buf, uint32_t *size)
+int efs_read_file(const char *path, uint8_t *out_buf, size_t *size)
 {
     int h = get_qmi_client_handle();
     if (!h)
@@ -904,8 +905,9 @@ int efs_write_large_file(const char *path, const uint8_t *data, uint32_t len)
 /**
  * Секція 4: IMS Параметри
  */
-int ims_get_parm(int16_t parm_id, char *val_str)
+int ims_get_parm(int id, char *val_str)
 {
+    int16_t parm_id = (int16_t)id; // 16-bit on the wire
     int h = get_qmi_client_handle();
     if (!h || !val_str)
         return -1;
