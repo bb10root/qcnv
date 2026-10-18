@@ -229,6 +229,7 @@ int main(int argc, char *argv[])
     const char *target = argv[2];
     const char *filename = NULL;
     int allow_imei = 0;
+    int ret = 0;
 
     for (int i = 1; i < argc; i++)
     {
@@ -247,7 +248,7 @@ int main(int argc, char *argv[])
     }
 
     // --- ЧИТАННЯ (read / fread / iread) ---
-    if (strcmp(cmd, "read") == 0 || strcmp(cmd, "fread") == 0 || strcmp(cmd, "iread") == 0)
+    else if (strcmp(cmd, "read") == 0 || strcmp(cmd, "fread") == 0 || strcmp(cmd, "iread") == 0)
     {
         uint8_t *buffer = NULL;
         size_t data_len = 0;
@@ -273,9 +274,8 @@ int main(int argc, char *argv[])
         else // fread
         {
             uint32_t f_size = efs_get_file_size(target);
-            if (f_size > 0)
+            if (f_size > 0 && (buffer = malloc(f_size)) != NULL)
             {
-                buffer = malloc(f_size);
                 data_len = f_size;
                 if (f_size < 0x800)
                 {
@@ -311,6 +311,7 @@ int main(int argc, char *argv[])
         else
         {
             printf("Error: Could not read '%s'\n", target);
+            ret = 1;
         }
         free(buffer);
     }
@@ -363,6 +364,7 @@ int main(int argc, char *argv[])
             printf("Error: NV %d is the IMEI; refusing to write without --allow-imei.\n", NV_IMEI);
             free(payload);
             payload = NULL;
+            ret = 1;
         }
         else if (payload)
         {
@@ -378,6 +380,7 @@ int main(int argc, char *argv[])
                 else
                 {
                     printf("Error: IMS set_parm failed\n");
+                    ret = 1;
                 }
             }
             else if (strcmp(cmd, "fwrite") == 0)
@@ -391,7 +394,10 @@ int main(int argc, char *argv[])
                     printf("Success: Written %zu bytes to EFS '%s'\n", p_len, target);
                 }
                 else
+                {
                     printf("Error: EFS write failed\n");
+                    ret = 1;
+                }
             }
             else // write (NV)
             {
@@ -402,15 +408,26 @@ int main(int argc, char *argv[])
                     efs_force_sync();
                     printf("Success: Written %zu bytes to NV %d\n", p_len, id);
                 }
+                else
+                {
+                    printf("Error: NV %u write failed (max 128 bytes)\n", id);
+                    ret = 1;
+                }
             }
             free(payload);
         }
-        else
+        else if (!ret)
         {
             printf("Error: No data to write.\n");
+            ret = 1;
         }
+    }
+    else
+    {
+        print_usage(argv[0]);
+        ret = 1;
     }
 
     release_qmi_client();
-    return 0;
+    return ret;
 }
